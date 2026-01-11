@@ -1,0 +1,30 @@
+# Source reference (not part of integration)
+DaVinci.groovy
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code
+.claude/
+
+# Home Assistant
+*.log
+home-assistant.log
+home-assistant_v2.db
+
+# OS
+.DS_Store
+Thumbs.db

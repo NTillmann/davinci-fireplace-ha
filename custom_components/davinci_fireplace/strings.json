@@ -1,0 +1,30 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "DaVinci Fireplace",
+        "description": "Enter the IP address and port of your Telnet interface.",
+        "data": {
+          "host": "IP Address",
+          "port": "Port"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect. Check IP address and port."
+    },
+    "abort": {
+      "already_configured": "This fireplace is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Options",
+        "data": {
+          "scan_interval": "Refresh interval"
+        }
+      }
+    }
+  }
+}

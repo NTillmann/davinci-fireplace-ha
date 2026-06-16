@@ -46,11 +46,9 @@ class DaVinciFlameSwitch(DaVinciEntityMixin, SwitchEntity):
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn on the flame."""
         _LOGGER.debug("Flame turn_on")
-        await self.coordinator.send_command("SET FLAME ON")
-        await self.coordinator.async_refresh_property("FLAME")
+        self.coordinator.set_and_refresh("SET FLAME ON", refresh=("FLAME",))
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the flame."""
         _LOGGER.debug("Flame turn_off")
-        await self.coordinator.send_command("SET FLAME OFF")
-        await self.coordinator.async_refresh_property("FLAME")
+        self.coordinator.set_and_refresh("SET FLAME OFF", refresh=("FLAME",))

@@ -74,23 +74,20 @@ class DaVinciFan(DaVinciEntityMixin, FanEntity):
         else:
             # Plain turn on - just send ON, fireplace remembers last speed
             _LOGGER.debug("Fan turn_on (no percentage specified)")
-            await self.coordinator.send_command("SET HEATFAN ON")
-            await self.coordinator.async_refresh_property("HEATFAN")
+            self.coordinator.set_and_refresh("SET HEATFAN ON", refresh=("HEATFAN",))
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the fan."""
         _LOGGER.debug("Fan turn_off")
-        await self.coordinator.send_command("SET HEATFAN OFF")
-        await self.coordinator.async_refresh_property("HEATFAN")
+        self.coordinator.set_and_refresh("SET HEATFAN OFF", refresh=("HEATFAN",))
 
     async def async_set_percentage(self, percentage: int) -> None:
         """Set the fan speed percentage."""
         # Convert 0-100 to 0-10
         speed = round(percentage / 10)
         _LOGGER.debug("Fan set_percentage=%d (speed=%d)", percentage, speed)
-        await self.coordinator.send_command(f"SET HEATFANSPEED {speed}")
-        if speed == 0:
-            await self.coordinator.send_command("SET HEATFAN OFF")
-        else:
-            await self.coordinator.send_command("SET HEATFAN ON")
-        await self.coordinator.async_refresh_property("HEATFAN", "HEATFANSPEED")
+        self.coordinator.set_and_refresh(
+            f"SET HEATFANSPEED {speed}",
+            "SET HEATFAN OFF" if speed == 0 else "SET HEATFAN ON",
+            refresh=("HEATFAN", "HEATFANSPEED"),
+        )

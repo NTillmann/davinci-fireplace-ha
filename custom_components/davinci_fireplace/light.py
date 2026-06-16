@@ -83,20 +83,21 @@ class DaVinciLampLight(DaVinciEntityMixin, LightEntity):
             # Convert 0-255 to 0-10 for fireplace
             level = round(kwargs[ATTR_BRIGHTNESS] / 25.5)
             _LOGGER.debug("Lamp turn_on with brightness=%d (level=%d)", kwargs[ATTR_BRIGHTNESS], level)
-            await self.coordinator.send_command(f"SET LAMPLEVEL {level}")
             # Brightness 0 means turn off
-            await self.coordinator.send_command(f"SET LAMP {'OFF' if level == 0 else 'ON'}")
+            self.coordinator.set_and_refresh(
+                f"SET LAMPLEVEL {level}",
+                f"SET LAMP {'OFF' if level == 0 else 'ON'}",
+                refresh=("LAMP", "LAMPLEVEL"),
+            )
         else:
             # No brightness specified - just turn on at current level
             _LOGGER.debug("Lamp turn_on (no brightness specified)")
-            await self.coordinator.send_command("SET LAMP ON")
-        await self.coordinator.async_refresh_property("LAMP", "LAMPLEVEL")
+            self.coordinator.set_and_refresh("SET LAMP ON", refresh=("LAMP", "LAMPLEVEL"))
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the lamp."""
         _LOGGER.debug("Lamp turn_off")
-        await self.coordinator.send_command("SET LAMP OFF")
-        await self.coordinator.async_refresh_property("LAMP")
+        self.coordinator.set_and_refresh("SET LAMP OFF", refresh=("LAMP",))
 
 
 class DaVinciLEDLight(DaVinciEntityMixin, LightEntity):
@@ -147,11 +148,10 @@ class DaVinciLEDLight(DaVinciEntityMixin, LightEntity):
         )
 
         if not has_color_attr:
-            # No color specified - just turn on at current/last color
+            # No color specified - just turn on at current/last color.
+            # Refresh both LED and LEDCOLOR since LEDCOLOR returns "OFF" when LED is off.
             _LOGGER.debug("LED turn_on (no color specified)")
-            await self.coordinator.send_command("SET LED ON")
-            # Refresh both LED and LEDCOLOR since LEDCOLOR returns "OFF" when LED is off
-            await self.coordinator.async_refresh_property("LED", "LEDCOLOR")
+            self.coordinator.set_and_refresh("SET LED ON", refresh=("LED", "LEDCOLOR"))
             return
 
         r, g, b, w = self.coordinator.state.led_rgbw
@@ -181,14 +181,14 @@ class DaVinciLEDLight(DaVinciEntityMixin, LightEntity):
                 r, g, b, w = (min(255, int(c * factor)) for c in (r, g, b, w))
 
         _LOGGER.debug("LED turn_on with RGBW=(%d,%d,%d,%d)", r, g, b, w)
-        await self.coordinator.send_command(f"SET LEDCOLOR {r},{g},{b},{w}")
-
         # All zeros means turn off
-        await self.coordinator.send_command(f"SET LED {'OFF' if (r, g, b, w) == (0, 0, 0, 0) else 'ON'}")
-        await self.coordinator.async_refresh_property("LED", "LEDCOLOR")
+        self.coordinator.set_and_refresh(
+            f"SET LEDCOLOR {r},{g},{b},{w}",
+            f"SET LED {'OFF' if (r, g, b, w) == (0, 0, 0, 0) else 'ON'}",
+            refresh=("LED", "LEDCOLOR"),
+        )
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the LED."""
         _LOGGER.debug("LED turn_off")
-        await self.coordinator.send_command("SET LED OFF")
-        await self.coordinator.async_refresh_property("LED")
+        self.coordinator.set_and_refresh("SET LED OFF", refresh=("LED",))

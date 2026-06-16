@@ -485,6 +485,22 @@ class DaVinciCoordinator:
             if response is not None and response not in ("OK", "ERROR"):
                 self._handle_get_response(prop, response)
 
+    def set_and_refresh(self, *commands: str, refresh: tuple[str, ...] = ()) -> None:
+        """Run SET command(s) then read back `refresh`, in the background.
+
+        Lets entity service calls return immediately. The work runs as one
+        tracked task; each command still goes through _request (serialized, and
+        bounded by RESPONSE_TIMEOUT) so it can neither hang nor desync.
+        """
+
+        async def _run() -> None:
+            for cmd in commands:
+                await self.send_command(cmd)
+            if refresh:
+                await self.async_refresh_property(*refresh)
+
+        self._hass.async_create_background_task(_run(), name=f"{DOMAIN}_action")
+
     async def _periodic_refresh_loop(self) -> None:
         """Periodically refresh state from fireplace."""
         while self._running:

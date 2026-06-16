@@ -1,7 +1,7 @@
 {
   "domain": "davinci_fireplace",
   "name": "DaVinci Fireplace",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "homeassistant": "2024.1.0",
   "documentation": "https://github.com/NTillmann/davinci-fireplace-ha",
   "issue_tracker": "https://github.com/NTillmann/davinci-fireplace-ha/issues",

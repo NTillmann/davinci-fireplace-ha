@@ -17,7 +17,6 @@ from .const import (
     BACKOFF_MAX,
     COMMAND_DELAY,
     DOMAIN,
-    MAX_QUEUE_SIZE,
     REFRESH_PROPERTIES,
     RESPONSE_TIMEOUT,
 )
@@ -91,10 +90,16 @@ class DaVinciCoordinator:
     when state changes (e.g., via physical controls or remote).
 
     Architecture:
-        Three concurrent asyncio tasks run continuously:
-        1. _connection_loop: Maintains Telnet connection with auto-reconnect
-        2. _command_loop: Processes queued commands with 1s rate limiting
-        3. _periodic_refresh_loop: Polls all properties at configured interval
+        Two concurrent asyncio tasks run continuously:
+        1. _connection_loop: Maintains Telnet connection with auto-reconnect,
+           then reads the stream (HEY pushes update state; every other line is
+           the response to the single in-flight command).
+        2. _periodic_refresh_loop: Polls all properties at the configured interval.
+
+    Request/Response:
+        The protocol is synchronous: one command is in flight at a time (guarded
+        by a lock) and its reply is the next non-HEY line, so correlation is
+        structural rather than timing-based. See _request().
 
     Push Updates:
         The fireplace sends "HEY <property> <value>" messages when state changes.
@@ -105,14 +110,8 @@ class DaVinciCoordinator:
         updates. When state changes, all callbacks are invoked, causing entities
         to call async_write_ha_state() and update the UI.
 
-    Command Queueing:
-        Commands are queued via send_command() and processed with 1-second
-        delays to avoid overwhelming the fireplace. The queue has a 100-command
-        limit; excess commands are dropped with a warning.
-
     Protocol Notes:
         - Line terminator is CR (\\r), not LF
-        - GET responses are correlated by timing, not request ID
         - See PROTOCOL.md for full protocol documentation
     """
 
@@ -133,16 +132,14 @@ class DaVinciCoordinator:
 
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
-        self._pending_get: str | None = None
+        self._command_lock = asyncio.Lock()  # one command in flight at a time
+        self._response: asyncio.Future[str] | None = None  # reply to that command
         self._running: bool = False
         self._callbacks: set[Callable[[], None]] = set()
-        self._command_queue: asyncio.Queue[str] = asyncio.Queue()
         self._connection_task: asyncio.Task[None] | None = None
-        self._command_task: asyncio.Task[None] | None = None
         self._refresh_task: asyncio.Task[None] | None = None
         self._reconnect_attempts: int = 0
         self._last_error: str | None = None
-        self._last_command: str | None = None  # Track for ERROR context
         self._scheduled_refresh: asyncio.TimerHandle | None = None
 
         self.state = FireplaceState()
@@ -175,11 +172,6 @@ class DaVinciCoordinator:
         return self._last_error
 
     @property
-    def command_queue_size(self) -> int:
-        """Return current command queue size."""
-        return self._command_queue.qsize()
-
-    @property
     def entry_id(self) -> str:
         """Return the config entry ID."""
         return self._entry_id
@@ -210,7 +202,6 @@ class DaVinciCoordinator:
         _LOGGER.debug("Starting coordinator tasks for %s:%s", self._host, self._port)
         self._running = True
         self._connection_task = asyncio.create_task(self._connection_loop())
-        self._command_task = asyncio.create_task(self._command_loop())
         self._refresh_task = asyncio.create_task(self._periodic_refresh_loop())
 
     async def async_stop(self) -> None:
@@ -223,7 +214,7 @@ class DaVinciCoordinator:
             self._scheduled_refresh = None
 
         # Cancel all tasks
-        for task in (self._connection_task, self._command_task, self._refresh_task):
+        for task in (self._connection_task, self._refresh_task):
             if task:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -266,9 +257,6 @@ class DaVinciCoordinator:
                 if self._scheduled_refresh:
                     self._scheduled_refresh.cancel()
                     self._scheduled_refresh = None
-
-                # Session ended - clear pending GET (response will never arrive)
-                self._pending_get = None
 
                 # Session ended - close writer before reconnecting
                 if self._writer and not self._writer.is_closing():
@@ -322,26 +310,16 @@ class DaVinciCoordinator:
                 break  # Exit loop, trigger reconnect
 
             line_str = line.decode().rstrip("\r").strip()
-            if not line_str or line_str in ("OK", "ERROR"):
-                if line_str == "ERROR":
-                    _LOGGER.warning(
-                        "Fireplace returned ERROR (last command: %s)",
-                        self._last_command or "unknown",
-                    )
+            if not line_str:
                 continue
 
             if line_str.startswith("HEY "):
-                # HEY format: "HEY <property> <value>"
+                # Unsolicited push: "HEY <property> <value>"
                 self._handle_hey_message(line_str[4:])
-            elif self._pending_get:
-                _LOGGER.debug(
-                    "Received response for %s: %s", self._pending_get, line_str
-                )
-                self._handle_get_response(self._pending_get, line_str)
-                self._pending_get = None
+            elif self._response is not None and not self._response.done():
+                # Reply to the in-flight command (a GET value, or "OK"/"ERROR")
+                self._response.set_result(line_str)
             else:
-                # Responses may arrive without a pending GET if commands overlap.
-                # Safe to ignore - see PROTOCOL.md "Edge Cases".
                 _LOGGER.debug("Ignoring unsolicited message: %s", line_str)
 
     def _handle_hey_message(self, message: str) -> None:
@@ -446,58 +424,35 @@ class DaVinciCoordinator:
         r, g, b, w = (int(x) for x in match.groups())
         return (r, g, b, w)
 
-    async def _command_loop(self) -> None:
-        """Process command queue with rate limiting."""
-        while self._running:
+    async def _request(self, cmd: str) -> str | None:
+        """Send a command and return its response line, or None if unavailable.
+
+        The protocol is synchronous, so the lock keeps a single command in flight
+        and the read loop resolves its future with the next non-HEY line. We then
+        wait COMMAND_DELAY before releasing the lock to honor the device's pacing.
+        """
+        async with self._command_lock:
+            if self._writer is None or self._writer.is_closing():
+                _LOGGER.warning("Cannot send command (not connected): %s", cmd)
+                return None
+            self._response = asyncio.get_running_loop().create_future()
             try:
-                cmd = await self._command_queue.get()
-
-                # If this is a GET command, wait for any pending GET response first.
-                # This prevents response misattribution - see PROTOCOL.md
-                # "Sequential Request Model". Wait up to RESPONSE_TIMEOUT.
-                if cmd.startswith("GET "):
-                    wait_interval = 0.1
-                    max_iterations = int(RESPONSE_TIMEOUT / wait_interval)
-                    for _ in range(max_iterations):
-                        if self._pending_get is None:
-                            break
-                        await asyncio.sleep(wait_interval)
-                    else:
-                        _LOGGER.debug(
-                            "Timeout waiting for GET %s response, proceeding anyway",
-                            self._pending_get,
-                        )
-
-                await self._send_command_internal(cmd)
-                await asyncio.sleep(COMMAND_DELAY)
-            except asyncio.CancelledError:
-                raise
-            except Exception as ex:
-                _LOGGER.exception("Error in command loop: %s", ex)
-
-    async def _send_command_internal(self, cmd: str) -> None:
-        """Send a command to the fireplace."""
-        if self._writer is None or self._writer.is_closing():
-            _LOGGER.warning("Cannot send command (not connected): %s", cmd)
-            return
-        try:
-            self._last_command = cmd
-            # Track GET commands for response correlation - MUST be set when
-            # SENDING, not when queuing. See PROTOCOL.md "Response Correlation".
-            if cmd.startswith("GET "):
-                self._pending_get = cmd[4:]
-            self._writer.write(f"{cmd}\r".encode())
-            await self._writer.drain()
-            _LOGGER.debug("Sent: %s", cmd)
-        except (ConnectionError, OSError) as ex:
-            _LOGGER.warning("Send failed for '%s': %s", cmd, ex)
-            # Connection loop will handle reconnect
+                self._writer.write(f"{cmd}\r".encode())
+                await self._writer.drain()
+                response = await asyncio.wait_for(self._response, RESPONSE_TIMEOUT)
+            except asyncio.TimeoutError:
+                _LOGGER.debug("No response to %r within %.0fs", cmd, RESPONSE_TIMEOUT)
+                response = None
+            except (ConnectionError, OSError) as ex:
+                _LOGGER.warning("Send failed for %r: %s", cmd, ex)
+                response = None
+            finally:
+                self._response = None
+            await asyncio.sleep(COMMAND_DELAY)
+            return response
 
     async def send_command(self, cmd: str) -> None:
-        """Queue a command to send to the fireplace.
-
-        Commands are queued and sent with 1-second delays between them.
-        This is NOT immediate - use for fire-and-forget commands.
+        """Send a SET command, logging a device-reported failure.
 
         Valid commands:
             SET LAMP ON|OFF
@@ -507,46 +462,28 @@ class DaVinciCoordinator:
             SET FLAME ON|OFF
             SET HEATFAN ON|OFF
             SET HEATFANSPEED 0-10
-            GET <property>  (use async_refresh_property instead)
 
         Args:
             cmd: The raw command string (without \\r terminator).
         """
-        queue_size = self._command_queue.qsize()
-        if queue_size >= MAX_QUEUE_SIZE:
-            _LOGGER.warning(
-                "Command queue full (%d commands), dropping: %s", queue_size, cmd
-            )
-            return
-        if queue_size > MAX_QUEUE_SIZE // 2:
-            _LOGGER.debug(
-                "Command queue growing: %d/%d commands", queue_size, MAX_QUEUE_SIZE
-            )
-        await self._command_queue.put(cmd)
-
-    async def _send_get(self, property_name: str) -> None:
-        """Queue a GET command for sending.
-
-        Note: _pending_get is set in _send_command_internal when the command
-        is actually SENT, not here when queued. The wait-for-pending logic
-        is in _command_loop to ensure sequential request handling.
-        """
-        await self.send_command(f"GET {property_name}")
+        if await self._request(cmd) == "ERROR":
+            _LOGGER.warning("Fireplace returned ERROR for command: %s", cmd)
 
     async def async_refresh(self) -> None:
-        """Queue all properties for refresh."""
-        for prop in REFRESH_PROPERTIES:
-            await self._send_get(prop)
+        """Refresh all properties from the fireplace."""
+        await self.async_refresh_property(*REFRESH_PROPERTIES)
 
     async def async_refresh_property(self, *props: str) -> None:
-        """Queue specific properties for refresh.
+        """Query properties and apply each authoritative response to state.
 
         Args:
             *props: Property names to refresh. Valid values:
                 LAMP, LAMPLEVEL, LED, LEDCOLOR, FLAME, HEATFAN, HEATFANSPEED
         """
         for prop in props:
-            await self._send_get(prop)
+            response = await self._request(f"GET {prop}")
+            if response is not None and response not in ("OK", "ERROR"):
+                self._handle_get_response(prop, response)
 
     async def _periodic_refresh_loop(self) -> None:
         """Periodically refresh state from fireplace."""

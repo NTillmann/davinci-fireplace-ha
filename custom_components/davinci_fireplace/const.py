@@ -17,10 +17,7 @@ BACKOFF_MAX = 3600  # 1 hour max
 
 # Telnet protocol timing
 COMMAND_DELAY = 1.0  # seconds between commands (rate limit)
-RESPONSE_TIMEOUT = 2.0  # seconds to wait for GET response
-
-# Command queue - drops commands when exceeded to prevent memory issues
-MAX_QUEUE_SIZE = 100
+RESPONSE_TIMEOUT = 2.0  # seconds to wait for a command's response
 
 # Properties to refresh on connect and periodically
 # Order matters: query power state before level for correct interpretation

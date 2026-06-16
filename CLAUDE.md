@@ -56,8 +56,8 @@ Copy `custom_components/davinci_fireplace/` to Home Assistant's `config/custom_c
 ### Core Components
 
 **coordinator.py** - Central hub managing everything:
-- `DaVinciCoordinator`: Telnet connection lifecycle, command queue (1s rate limit), response parsing, push message handling (HEY), exponential backoff reconnection
-  - Runs three concurrent asyncio tasks: `_connection_loop` (maintains connection), `_command_loop` (rate-limited sending), `_periodic_refresh_loop` (polling)
+- `DaVinciCoordinator`: Telnet connection lifecycle, synchronous request/response (`_request`: one command in flight under a lock, reply = next non-HEY line), push message handling (HEY), exponential backoff reconnection
+  - Runs two concurrent asyncio tasks: `_connection_loop` (maintains connection, reads the stream) and `_periodic_refresh_loop` (polling)
 - `FireplaceState`: Dataclass holding all device state (lamp, LED, flame, fan)
 - `DaVinciEntityMixin`: Shared entity functionality (availability, device_info, callback registration)
 
@@ -71,11 +71,13 @@ Copy `custom_components/davinci_fireplace/` to Home Assistant's `config/custom_c
 ```
 User Action → Entity.async_turn_on() → coordinator.send_command("SET ...")
                                                     ↓
-                                          Command Queue (1s spacing)
+                              _request: lock → send → await reply → 1s pacing
                                                     ↓
                                     Telnet → Telnet Interface → Serial → IFC Board
                                                     ↓
-IFC Board Response → coordinator._handle_get_response() → state update
+       reply line → request future │ HEY push → _handle_hey_message
+                                                    ↓
+       async_refresh_property → _handle_get_response() → state update
                                                     ↓
                             coordinator._notify_state_update() → entity callbacks
                                                     ↓
@@ -108,7 +110,7 @@ See PROTOCOL.md for full protocol documentation.
 
 | File | Purpose |
 |------|---------|
-| coordinator.py | Telnet connection, state management, command queue |
+| coordinator.py | Telnet connection, state management, request/response |
 | const.py | Constants: timing, backoff, property list |
 | diagnostics.py | HA diagnostics support (state dump for troubleshooting) |
 | PROTOCOL.md | Full protocol documentation |

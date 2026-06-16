@@ -37,6 +37,5 @@ async def async_get_config_entry_diagnostics(
         "connection": {
             "reconnect_attempts": coordinator.reconnect_attempts,
             "last_error": coordinator.last_error,
-            "queue_size": coordinator.command_queue_size,
         },
     }
